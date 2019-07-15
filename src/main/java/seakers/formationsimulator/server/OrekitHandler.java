@@ -27,6 +27,7 @@ import org.orekit.time.TimeScale;
 import org.orekit.time.TimeScalesFactory;
 import org.orekit.utils.Constants;
 import org.orekit.utils.IERSConventions;
+import org.orekit.utils.PVCoordinates;
 import seakers.formationsimulator.science.ForestArea;
 import seakers.formationsimulator.science.ForestHandler;
 import seakers.formationsimulator.science.ScienceState;
@@ -58,6 +59,9 @@ public class OrekitHandler implements Orekit.Iface {
 
     private Propagator propagator;
     private org.orekit.propagation.SpacecraftState currentState;
+
+    private Frame earthFrame;
+    private BodyShape earthShape;
 
     private boolean done;
 
@@ -98,10 +102,10 @@ public class OrekitHandler implements Orekit.Iface {
         double mu = Constants.WGS84_EARTH_MU; // gravitation coefficient
 
         // must use IERS_2003 and EME2000 frames to be consistent with STK
-        Frame earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2003, true);
+        earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2003, true);
         Frame inertialFrame = FramesFactory.getEME2000();
 
-        BodyShape earthShape = new OneAxisEllipsoid(Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
+        earthShape = new OneAxisEllipsoid(Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
                 Constants.WGS84_EARTH_FLATTENING, earthFrame);
 
         // Enter satellite orbital parameters
@@ -176,7 +180,7 @@ public class OrekitHandler implements Orekit.Iface {
         propertiesPropagator.setProperty("orekit.propagator.solarpressure", "true");
         propertiesPropagator.setProperty("orekit.propagator.solararea", "0.058");
 
-        PropagatorFactory pf = new PropagatorFactory(PropagatorType.NUMERICAL, propertiesPropagator);
+        PropagatorFactory pf = new PropagatorFactory(PropagatorType.J2, propertiesPropagator);
         propagator = pf.createPropagator(orb1, 100);
 
         // add all forest points to be analyzed
@@ -205,7 +209,8 @@ public class OrekitHandler implements Orekit.Iface {
     @Override
     public void step() throws TException {
         // Step duration in seconds
-        double stepT = 30.;
+        double stepT = 100.;
+        ScienceState.getInstance().reward = 0.;
 
         if (extrapDate.compareTo(endDate) <= 0) {
             currentState = propagator.propagate(extrapDate);
@@ -249,7 +254,12 @@ public class OrekitHandler implements Orekit.Iface {
 
     @Override
     public GroundPosition groundPosition() throws TException {
-        return null;
+        PVCoordinates currentCoords = this.currentState.getPVCoordinates();
+        org.hipparchus.geometry.euclidean.threed.Vector3D currentPos = currentCoords.getPosition();
+        GeodeticPoint earthPoint = earthShape.transform(currentPos, earthFrame, currentState.getDate());
+        return new GroundPosition(
+                FastMath.toDegrees(earthPoint.getLatitude()),
+                FastMath.toDegrees(earthPoint.getLongitude()));
     }
 
     @Override
