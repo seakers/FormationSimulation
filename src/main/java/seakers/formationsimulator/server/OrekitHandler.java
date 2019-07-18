@@ -61,7 +61,11 @@ public class OrekitHandler implements Orekit.Iface {
     private org.orekit.propagation.SpacecraftState currentState;
 
     private Frame earthFrame;
+    private Frame inertialFrame;
     private BodyShape earthShape;
+
+    private int stepsBeforeChange;
+    private int newFormationType;
 
     private boolean done;
 
@@ -103,7 +107,7 @@ public class OrekitHandler implements Orekit.Iface {
 
         // must use IERS_2003 and EME2000 frames to be consistent with STK
         earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2003, true);
-        Frame inertialFrame = FramesFactory.getEME2000();
+        inertialFrame = FramesFactory.getEME2000();
 
         earthShape = new OneAxisEllipsoid(Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
                 Constants.WGS84_EARTH_FLATTENING, earthFrame);
@@ -115,7 +119,7 @@ public class OrekitHandler implements Orekit.Iface {
         double RAAN = Orbits.LTAN2RAAN(h, 18.0, 1, 12, 2021);
 
         // define instruments
-        NadirRectangularFOV fov = new NadirRectangularFOV(FastMath.toRadians(57), FastMath.toRadians(20), 0, earthShape);
+        NadirRectangularFOV fov = new NadirRectangularFOV(FastMath.toRadians(10), FastMath.toRadians(20), 0, earthShape);
         ArrayList<Instrument> payload = new ArrayList<>();
         Instrument view1 = new Instrument("SAR", fov, 100, 100);
         payload.add(view1);
@@ -125,7 +129,7 @@ public class OrekitHandler implements Orekit.Iface {
         HashSet<CommunicationBand> satBands = new HashSet<>();
         satBands.add(CommunicationBand.UHF);
 
-        Orbit orb1 = new KeplerianOrbit(a747, 0.0001, iSSO, 0.0, RAAN, Math.toRadians(0), PositionAngle.MEAN, inertialFrame, startDate, mu);
+        Orbit orb1 = new KeplerianOrbit(a747, 0.0001, iSSO, 0.0, RAAN, FastMath.toRadians(0), PositionAngle.MEAN, inertialFrame, startDate, mu);
         Satellite sat1 = new Satellite("mainsat", orb1, null, payload,
                 new ReceiverAntenna(6., satBands), new TransmitterAntenna(6., satBands), Propagator.DEFAULT_MASS, Propagator.DEFAULT_MASS);
 
@@ -152,7 +156,10 @@ public class OrekitHandler implements Orekit.Iface {
                     valueArray = coverage.evaluate(pointGrid, valueArray);
                     if (valueArray[0] != 255) {
                         DirectPosition latlng = coverage.getGridGeometry().gridToWorld(pointGrid);
-                        GeodeticPoint orekit_latlng = new GeodeticPoint(latlng.getOrdinate(0), latlng.getOrdinate(1), 0);
+                        GeodeticPoint orekit_latlng = new GeodeticPoint(
+                                FastMath.toRadians(latlng.getOrdinate(0)),
+                                FastMath.toRadians(latlng.getOrdinate(1)),
+                                0.);
                         forests.add(new ForestArea(earthShape, orekit_latlng, "forest", valueArray[0]));
                     }
                 }
@@ -180,23 +187,17 @@ public class OrekitHandler implements Orekit.Iface {
         propertiesPropagator.setProperty("orekit.propagator.solarpressure", "true");
         propertiesPropagator.setProperty("orekit.propagator.solararea", "0.058");
 
-        PropagatorFactory pf = new PropagatorFactory(PropagatorType.J2, propertiesPropagator);
+        PropagatorFactory pf = new PropagatorFactory(PropagatorType.NUMERICAL, propertiesPropagator);
         propagator = pf.createPropagator(orb1, 100);
 
         // add all forest points to be analyzed
-        double fovStepSize = sat1.getOrbit().getKeplerianPeriod() / 100.;
+        double fovStepSize = sat1.getOrbit().getKeplerianPeriod() / 1000.;
         double threshold = 1e-3;
         for (CoveragePoint point: covDef1.getPoints()) {
-            FOVDetector fovDetec = new FOVDetector(
-                    propagator.getInitialState(),
-                    startDate,
-                    endDate,
-                    point,
-                    view1,
-                    fovStepSize,
-                    threshold,
-                    Action.CONTINUE);
-            fovDetec.withHandler(new ForestHandler());
+            FOVDetector fovDetec = new FOVDetector(point, view1)
+                    .withMaxCheck(fovStepSize)
+                    .withThreshold(threshold)
+                    .withHandler(new ForestHandler());
 
             propagator.addEventDetector(fovDetec);
         }
@@ -204,19 +205,25 @@ public class OrekitHandler implements Orekit.Iface {
         done = false;
         steps = 0;
         currentState = propagator.getInitialState();
+        stepsBeforeChange = 0;
+        newFormationType = 0;
     }
 
     @Override
     public void step() throws TException {
         // Step duration in seconds
-        double stepT = 100.;
+        double stepT = 30.;
         ScienceState.getInstance().reward = 0.;
+
+        if (stepsBeforeChange > 0) {
+            --stepsBeforeChange;
+            if (stepsBeforeChange == 0) {
+                ScienceState.getInstance().formationType = newFormationType;
+            }
+        }
 
         if (extrapDate.compareTo(endDate) <= 0) {
             currentState = propagator.propagate(extrapDate);
-
-            // Call DRL Model
-            // Use output to move the system
 
             System.out.println("step " + steps++);
             System.out.println(" time : " + currentState.getDate());
@@ -256,7 +263,7 @@ public class OrekitHandler implements Orekit.Iface {
     public GroundPosition groundPosition() throws TException {
         PVCoordinates currentCoords = this.currentState.getPVCoordinates();
         org.hipparchus.geometry.euclidean.threed.Vector3D currentPos = currentCoords.getPosition();
-        GeodeticPoint earthPoint = earthShape.transform(currentPos, earthFrame, currentState.getDate());
+        GeodeticPoint earthPoint = earthShape.transform(currentPos, inertialFrame, currentState.getDate());
         return new GroundPosition(
                 FastMath.toDegrees(earthPoint.getLatitude()),
                 FastMath.toDegrees(earthPoint.getLongitude()));
@@ -269,6 +276,9 @@ public class OrekitHandler implements Orekit.Iface {
 
     @Override
     public void sendHighLevelCommand(int command) throws TException {
-        ScienceState.getInstance().formationType = command;
+        System.out.println("Changing formation to " + command + " after 90 steps.");
+        ScienceState.getInstance().formationType = 0;
+        newFormationType = command;
+        stepsBeforeChange = 90;
     }
 }

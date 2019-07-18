@@ -12,6 +12,7 @@ public class ForestHandler implements EventHandler<FOVDetector> {
             ForestArea area = (ForestArea)detector.getPVTarget();
             int formationType = ScienceState.getInstance().formationType;
             if (formationType == area.getForestType()) {
+                System.out.println("I have measured something!");
                 ScienceState.getInstance().reward += 1;
             }
         }
