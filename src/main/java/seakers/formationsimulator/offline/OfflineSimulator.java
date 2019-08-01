@@ -1,14 +1,11 @@
-package seakers.formationsimulator.server;
+package seakers.formationsimulator.offline;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.apache.thrift.TException;
+import com.google.gson.Gson;
 import org.geotools.coverage.grid.GridCoordinates2D;
 import org.geotools.coverage.grid.GridCoverage2D;
 import org.geotools.coverage.grid.GridEnvelope2D;
 import org.geotools.coverage.grid.io.GridCoverage2DReader;
 import org.geotools.gce.geotiff.GeoTiffReader;
-import org.hipparchus.geometry.euclidean.threed.Rotation;
 import org.hipparchus.util.FastMath;
 import org.opengis.geometry.DirectPosition;
 import org.opengis.referencing.crs.CoordinateReferenceSystem;
@@ -20,11 +17,11 @@ import org.orekit.data.DataProvidersManager;
 import org.orekit.data.DirectoryCrawler;
 import org.orekit.frames.Frame;
 import org.orekit.frames.FramesFactory;
-import org.orekit.frames.Transform;
 import org.orekit.orbits.KeplerianOrbit;
 import org.orekit.orbits.Orbit;
 import org.orekit.orbits.PositionAngle;
 import org.orekit.propagation.Propagator;
+import org.orekit.propagation.SpacecraftState;
 import org.orekit.time.AbsoluteDate;
 import org.orekit.time.TimeScale;
 import org.orekit.time.TimeScalesFactory;
@@ -35,9 +32,6 @@ import seakers.formationsimulator.science.ForestArea;
 import seakers.formationsimulator.science.ForestHandler;
 import seakers.formationsimulator.science.ScienceState;
 import seakers.formationsimulator.thrift.GroundPosition;
-import seakers.formationsimulator.thrift.Orekit;
-import seakers.formationsimulator.thrift.SpacecraftState;
-import seakers.formationsimulator.thrift.Vector3D;
 import seakers.orekit.event.detector.FOVDetector;
 import seakers.orekit.object.*;
 import seakers.orekit.object.communications.ReceiverAntenna;
@@ -48,33 +42,16 @@ import seakers.orekit.propagation.PropagatorType;
 import seakers.orekit.util.Orbits;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
-import java.util.*;
+import java.sql.Time;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Properties;
 
-public class OrekitHandler implements Orekit.Iface {
-
-    private AbsoluteDate startDate;
-    private AbsoluteDate endDate;
-    private AbsoluteDate extrapDate;
-
-    private Propagator propagator;
-    private org.orekit.propagation.SpacecraftState currentState;
-
-    private Frame earthFrame;
-    private Frame inertialFrame;
-    private BodyShape earthShape;
-    private ArrayList<Satellite> satellites;
-
-    private int stepsBeforeChange;
-    private int newFormationType;
-
-    private boolean done;
-
-    private int steps;
-
-    private static final Logger logger = LogManager.getLogger(OrekitHandler.class);
-
-    public OrekitHandler() {
+public class OfflineSimulator {
+    public static void main(String[] args) {
         // configure Orekit
         File home       = new File(System.getProperty("user.home"));
         File orekitData = new File(home, "orekit-data");
@@ -92,21 +69,16 @@ public class OrekitHandler implements Orekit.Iface {
         // if running on a non-US machine, need the line below
         Locale.setDefault(new Locale("en", "US"));
 
-    }
-
-    @Override
-    public void reset() throws TException {
         TimeScale utc = TimeScalesFactory.getUTC();
-        startDate = new AbsoluteDate(2021, 12, 1, 18, 00, 00.000, utc);
-        endDate = new AbsoluteDate(2022, 1, 1, 18, 00, 00.000, utc);
-        extrapDate = startDate;
+        AbsoluteDate startDate = new AbsoluteDate(2021, 12, 1, 18, 00, 00.000, utc);
+        AbsoluteDate endDate = new AbsoluteDate(2021, 12, 15, 18, 00, 00.000, utc);
         double mu = Constants.WGS84_EARTH_MU; // gravitation coefficient
 
         // must use IERS_2003 and EME2000 frames to be consistent with STK
-        earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2003, true);
-        inertialFrame = FramesFactory.getEME2000();
+        Frame earthFrame = FramesFactory.getITRF(IERSConventions.IERS_2003, true);
+        Frame inertialFrame = FramesFactory.getEME2000();
 
-        earthShape = new OneAxisEllipsoid(Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
+        BodyShape earthShape = new OneAxisEllipsoid(Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
                 Constants.WGS84_EARTH_FLATTENING, earthFrame);
 
         // Enter satellite orbital parameters
@@ -121,7 +93,7 @@ public class OrekitHandler implements Orekit.Iface {
         Instrument view1 = new Instrument("SAR", fov, 100, 100);
         payload.add(view1);
 
-        satellites = new ArrayList<>();
+        ArrayList<Satellite> satellites = new ArrayList<>();
 
         HashSet<CommunicationBand> satBands = new HashSet<>();
         satBands.add(CommunicationBand.UHF);
@@ -185,7 +157,7 @@ public class OrekitHandler implements Orekit.Iface {
         propertiesPropagator.setProperty("orekit.propagator.solararea", "0.058");
 
         PropagatorFactory pf = new PropagatorFactory(PropagatorType.J2, propertiesPropagator);
-        propagator = pf.createPropagator(orb1, 100);
+        Propagator propagator = pf.createPropagator(orb1, 100);
 
         // add all forest points to be analyzed
         double fovStepSize = sat1.getOrbit().getKeplerianPeriod() / 1000.;
@@ -194,113 +166,64 @@ public class OrekitHandler implements Orekit.Iface {
             FOVDetector fovDetec = new FOVDetector(point, view1)
                     .withMaxCheck(fovStepSize)
                     .withThreshold(threshold)
-                    .withHandler(new ForestHandler());
+                    .withHandler(new ForestHandler(true));
 
             propagator.addEventDetector(fovDetec);
         }
 
-        done = false;
-        steps = 0;
-        currentState = propagator.getInitialState();
-        stepsBeforeChange = 0;
-        newFormationType = 0;
-    }
+        boolean done = false;
+        int steps = 0;
+        SpacecraftState currentState = propagator.getInitialState();
 
-    @Override
-    public void step() throws TException {
-        // Step duration in seconds
+        SimulationInformation simulationInformation = new SimulationInformation();
+        simulationInformation.timesteps = new ArrayList<>();
+
+        // Extrapolation loop
         double stepT = 30.;
-        ScienceState.getInstance().reward = 0.;
+        for (AbsoluteDate extrapDate = startDate;
+             extrapDate.compareTo(endDate) <= 0;
+             extrapDate = extrapDate.shiftedBy(stepT))  {
 
-        if (stepsBeforeChange > 0) {
-            --stepsBeforeChange;
-            if (stepsBeforeChange == 0) {
-                ScienceState.getInstance().formationType = newFormationType;
+            ScienceState.getInstance().scienceAtStep = new ArrayList<>();
+
+            if (extrapDate.compareTo(endDate) <= 0) {
+                currentState = propagator.propagate(extrapDate);
+                steps++;
+                extrapDate = extrapDate.shiftedBy(stepT);
+
+                if (steps % 500 == 0) {
+                    System.out.println("step " + steps);
+                    System.out.println(" time : " + currentState.getDate());
+                    System.out.println(" " + currentState.getOrbit());
+                }
+
+                PVCoordinates currentCoords = currentState.getPVCoordinates();
+                org.hipparchus.geometry.euclidean.threed.Vector3D currentPos = currentCoords.getPosition();
+                GeodeticPoint earthPoint = earthShape.transform(currentPos, inertialFrame, currentState.getDate());
+
+                TimestepInformation timestepInformation = new TimestepInformation();
+                timestepInformation.visitedPoints = new ArrayList<>(ScienceState.getInstance().scienceAtStep);
+                timestepInformation.date = currentState.getDate();
+                timestepInformation.groundTrack = earthPoint;
+
+                simulationInformation.timesteps.add(timestepInformation);
             }
-        }
-
-        if (extrapDate.compareTo(endDate) <= 0) {
-            currentState = propagator.propagate(extrapDate);
-            if (steps % 500 == 0) {
-                logger.debug("step " + steps);
-                logger.debug(" time : " + currentState.getDate());
-                logger.debug(" " + currentState.getOrbit());
+            else {
+                done = true;
             }
-            steps++;
 
-            extrapDate = extrapDate.shiftedBy(stepT);
         }
-        else {
-            done = true;
+
+        Gson gson = new Gson();
+        String outputPath = "/Users/anmartin/Projects/FormationSimulation/fastsimulation.json";
+
+        try {
+            FileWriter writer = new FileWriter(outputPath);
+            gson.toJson(simulationInformation, writer);
+            writer.close();
         }
-    }
-
-    @Override
-    public boolean done() throws TException {
-        return done;
-    }
-
-    @Override
-    public List<SpacecraftState> currentStates() throws TException {
-        ArrayList<SpacecraftState> states = new ArrayList<>();
-        // TODO: Multiple satellites
-        org.hipparchus.geometry.euclidean.threed.Vector3D positionOrekit = currentState.getPVCoordinates().getPosition();
-        org.hipparchus.geometry.euclidean.threed.Vector3D velocityOrekit = currentState.getPVCoordinates().getVelocity();
-        Vector3D position = new Vector3D(positionOrekit.getX(), positionOrekit.getY(), positionOrekit.getZ());
-        Vector3D velocity = new Vector3D(velocityOrekit.getX(), velocityOrekit.getY(), velocityOrekit.getZ());
-        SpacecraftState state = new SpacecraftState(position, velocity);
-        states.add(state);
-        return states;
-    }
-
-    @Override
-    public double getReward() throws TException {
-        return ScienceState.getInstance().reward;
-    }
-
-    @Override
-    public GroundPosition groundPosition() throws TException {
-        PVCoordinates currentCoords = this.currentState.getPVCoordinates();
-        org.hipparchus.geometry.euclidean.threed.Vector3D currentPos = currentCoords.getPosition();
-        GeodeticPoint earthPoint = earthShape.transform(currentPos, inertialFrame, currentState.getDate());
-        return new GroundPosition(
-                FastMath.toDegrees(earthPoint.getLatitude()),
-                FastMath.toDegrees(earthPoint.getLongitude()));
-    }
-
-    @Override
-    public List<GroundPosition> getFOV() throws TException {
-        Satellite main = satellites.get(0);
-        NadirRectangularFOV cfov = (NadirRectangularFOV)main.getPayload().get(0).getFOV();
-        Rotation rot = cfov.alignWithNadirAndNormal(cfov.getCenter(), cfov.getAxis2(), currentState, currentState.getOrbit(), earthShape, currentState.getFrame());
-        Transform fovToInertSpc = new Transform(currentState.getDate(), rot.revert());
-        Transform spacecraftInertTransform = currentState.toTransform();
-        Transform fovToInertEar = new Transform(currentState.getDate(), fovToInertSpc, spacecraftInertTransform.getInverse());
-        Transform inertToBody = inertialFrame.getTransformTo(earthFrame, currentState.getDate());
-        Transform fovToBody   = new Transform(currentState.getDate(), fovToInertEar, inertToBody);
-        List<List<GeodeticPoint>> footprint = cfov.getFootprint(
-                fovToBody,
-                (OneAxisEllipsoid)earthShape,
-                0.1);
-        List<GroundPosition> thriftFootprint = new ArrayList<>();
-        for (GeodeticPoint point: footprint.get(0)) {
-            thriftFootprint.add(new GroundPosition(
-                    FastMath.toDegrees(point.getLatitude()),
-                    FastMath.toDegrees(point.getLongitude())));
+        catch (IOException e) {
+            e.printStackTrace();
         }
-        return thriftFootprint;
-    }
-
-    @Override
-    public void sendLowLevelCommands(List<Vector3D> commandList) throws TException {
-        // TODO: Implement commands from Alex model
-    }
-
-    @Override
-    public void sendHighLevelCommand(int command) throws TException {
-        //System.out.println("Changing formation to " + command + " after 90 steps.");
-        ScienceState.getInstance().formationType = -1;
-        newFormationType = command;
-        stepsBeforeChange = 90;
     }
 }

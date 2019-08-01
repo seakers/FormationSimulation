@@ -1,5 +1,7 @@
 package seakers.formationsimulator.science;
 
+import java.util.ArrayList;
+
 public class ScienceState {
 
     private static ScienceState instance = null;
@@ -7,6 +9,8 @@ public class ScienceState {
     public double reward;
 
     public int formationType;
+
+    public ArrayList<Integer> scienceAtStep;
 
     public static ScienceState getInstance() {
         if (instance == null)
@@ -18,5 +22,6 @@ public class ScienceState {
     private ScienceState() {
         reward = 0.;
         formationType = 1;
+        scienceAtStep = new ArrayList<>();
     }
 }
